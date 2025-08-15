@@ -19,6 +19,7 @@ import asyncio
 from websocket_manager import manager
 from auction_timer import auction_timer
 from achievements import achievement_manager, Achievement
+from scoring import PerformanceStats, calculate_points
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -584,8 +585,57 @@ async def join_tournament(tournament_id: str, join_data: TournamentJoin, current
         {"id": tournament_id},
         {"$set": {"participants": [p.dict() for p in tournament_obj.participants]}}
     )
-    
+
     return tournament_obj
+
+
+class PlayerScoreUpdate(BaseModel):
+    player_id: str
+    stats: PerformanceStats
+
+
+@api_router.post("/tournaments/{tournament_id}/score")
+async def update_player_score(tournament_id: str, update: PlayerScoreUpdate):
+    """Update a player's score and apply it to the owning participant."""
+    tournament = await db.tournaments.find_one({"id": tournament_id})
+    if not tournament:
+        raise HTTPException(status_code=404, detail="Tournament not found")
+
+    tournament_obj = Tournament(**tournament)
+    points = calculate_points(update.stats)
+    updated = False
+
+    for participant in tournament_obj.participants:
+        if update.player_id in participant.squad:
+            participant.total_score += points
+            updated = True
+
+    if updated:
+        await db.tournaments.update_one(
+            {"id": tournament_id},
+            {"$set": {"participants": [p.dict() for p in tournament_obj.participants]}}
+        )
+
+    return {"player_id": update.player_id, "points": points}
+
+
+@api_router.get("/tournaments/{tournament_id}/leaderboard")
+async def get_leaderboard(tournament_id: str):
+    """Return tournament participants ordered by score."""
+    tournament = await db.tournaments.find_one({"id": tournament_id})
+    if not tournament:
+        raise HTTPException(status_code=404, detail="Tournament not found")
+
+    tournament_obj = Tournament(**tournament)
+    participants = sorted(
+        tournament_obj.participants,
+        key=lambda p: p.total_score,
+        reverse=True,
+    )
+    return [
+        {"user_id": p.user_id, "username": p.username, "score": p.total_score}
+        for p in participants
+    ]
 
 # Enhanced Auction routes with real-time features
 @api_router.get("/auctions", response_model=List[Auction])
